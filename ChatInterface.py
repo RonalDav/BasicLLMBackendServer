@@ -3,12 +3,13 @@ Chat Interface for User Interaction with Language Model Backend
 
 This script defines a chat interface that interacts with a language model backend (Flask API)
 to process user messages, manage user memory, and ensure responses fit within character limits.
+Part of this is a migration from what I have used to make an LLM powered discord bot.
 
 Status:
 Incomplete memory management and output parsing
 
 Constants:
-- MAX_DISCORD_LENGTH: The maximum allowed character length for Discord messages (2000 characters).
+- MAX_DISCORD_LENGTH: The maximum allowed character length for messages (2000 characters).
 - SUMMARY_PROMPT: The prompt used for summarizing responses that exceed the character limit.
 
 """
@@ -115,7 +116,7 @@ class ChatInterface:
             return "There was an error processing your request."
 
     def ensure_character_limit(self, reply):
-        """Ensure the reply fits within Discord's character limit, and summarize if needed."""
+        """Ensure the reply fits within the character limit, and summarize if needed."""
         if len(reply) > MAX_DISCORD_LENGTH:
             logging.info("Response exceeds max character limit, attempting to summarize.")
             summary_payload = {"text": SUMMARY_PROMPT + "\n" + reply}
