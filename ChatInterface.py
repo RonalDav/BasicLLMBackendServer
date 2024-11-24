@@ -5,135 +5,101 @@ This script defines a chat interface that interacts with a language model backen
 to process user messages, manage user memory, and ensure responses fit within character limits.
 
 Status:
-Incomplete memory management and output parsing
+Incomplete memory management and output parsing. Memory DB still neds work.
 
-Constants:
-- MAX_DISCORD_LENGTH: The maximum allowed character length for Discord messages (2000 characters).
-- SUMMARY_PROMPT: The prompt used for summarizing responses that exceed the character limit.
 
 """
-import logging
 import requests
-from datetime import datetime, timedelta
-from langchain.memory import ConversationBufferMemory
+from sqlalchemy import create_engine, Column, String, Integer, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from datetime import datetime, timedelta, timezone
+from threading import Lock
+from typing import Optional
 
-# Constants
-MAX_DISCORD_LENGTH = 2000
-SUMMARY_PROMPT = "Please summarize the following text in the briefest way possible while retaining the key details."
+# Define the database model using SQLAlchemy
+Base = declarative_base()
 
-# Memory storage for chat histories
-# TODO: Migrate to a better storage solution
-user_memory = {}
-
-logging.basicConfig(level=logging.INFO) # tweak this as needed. 
+class ChatHistory(Base):
+    __tablename__ = 'chat_history'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    response = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.now(timezone.utc))
 
 class ChatInterface:
-    def __init__(self, flask_url="http://localhost:5000/chat"):
-        self.flask_url = flask_url
+    _instance = None
+    _lock = Lock()
 
-    def get_user_memory(self, user_id):
-        """Retrieve or create memory for a user."""
-        if user_id not in user_memory:
-            # Initialize memory for the user using ConversationBufferMemory
-            # if they are not present
-            user_memory[user_id] = {
-                "memory": ConversationBufferMemory(),
-                "last_activity": datetime.now()
-            }
-        return user_memory[user_id]["memory"]
+    def __new__(cls, server_url="http://localhost:5000", db_url="sqlite:///chat_history.db"):
+        if not cls._instance:
+            with cls._lock:
+                if not cls._instance:
+                    cls._instance = super().__new__(cls)
+                    cls._instance.server_url = server_url
+                    cls._instance.db_url = db_url
 
-    def purge_inactive_users(self, hours_inactive=1):
-        """Purges users who have been inactive for the specified number of hours."""
-        now = datetime.now()
-        for user_id in list(user_memory.keys()):
-            if (now - user_memory[user_id]["last_activity"]) > timedelta(hours=hours_inactive):
-                logging.info(f"Purging chat history for user: {user_id}")
-                del user_memory[user_id]
+                    # Set up SQLAlchemy database connection
+                    cls._instance.engine = create_engine(db_url, echo=True)
+                    Base.metadata.create_all(cls._instance.engine)  # Create the table if it doesn't exist
+                    SessionLocal = sessionmaker(bind=cls._instance.engine)
+                    cls._instance.session: Session = SessionLocal()
+
+        return cls._instance
+
+    def _send_request(self, endpoint, method="POST", data=None):
+        """Helper method to send HTTP requests to the Flask server using 'requests'."""
+        url = f"{self.server_url}{endpoint}"
+        
+        if method == "POST":
+            response = requests.post(url, json=data)
+            response.raise_for_status()  # Raises an exception for 4xx/5xx responses
+        else:  # Default to GET for retrieving history
+            response = requests.get(url, params=data)
+        
+        return response.json()
 
     def process_message(self, user_id, message):
-        logging.info(f"Processing message for user {user_id}: {message}")
-
-        # Retrieve or create user memory
-        memory = self.get_user_memory(user_id)
+        """Process incoming chat messages and store the history"""
+        # Prepare payload for sending to Flask server
+        data = {'text': message}  # Send only the message in the 'text' field
         
-        # Add the current message to the memory buffer
-        try:
-            memory.save_context({"input": message}, {"output": message})
-            logging.debug("Context successfully saved to memory.")
-        except ValueError as e:
-            logging.error(f"Error saving context: {e}")
-            return "Failed to save context due to an input error."
+        # Send the message to the Flask server (get response)
+        flask_response = self._send_request('/chat', method="POST", data=data)
+        
+        # Save the chat message and response to the SQLite database with the user_id
+        self._save_to_db(user_id, message, flask_response.get('response', 'No response'))
 
-        # Generate context from the memory
-        try:
-            context = memory.load_memory_variables({})["history"]
-            logging.debug(f"Loaded context: {context}")
-        except Exception as e:
-            logging.error(f"Error loading memory variables: {e}")
-            return "Failed to load memory variables."
+        return flask_response.get('response', 'No response')
 
-        # Send the context to the LLM backend to generate a response
-        response = self.get_response_from_llm(context)
+    def _save_to_db(self, user_id, message, response):
+        """Save a new chat message and response to the SQLite database."""
+        new_entry = ChatHistory(user_id=user_id, message=message, response=response)
+        self.session.add(new_entry)
+        self.session.commit()
 
-        # Ensure the response fits within the Discord character limit
-        final_reply = self.ensure_character_limit(response)
-        logging.debug(f"Final reply after character limit check: {final_reply}")
+    def erase_history(self, user_id, older_than_minutes: int = 10):
+        """Erase chat history for a user, optionally older than a certain number of minutes."""
+        threshold_time = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+        self.session.query(ChatHistory).filter(
+            ChatHistory.user_id == user_id,
+            ChatHistory.timestamp < threshold_time
+        ).delete()
+        self.session.commit()
 
-        # Final safety check for length before sending to Discord
-        if len(final_reply) > MAX_DISCORD_LENGTH:
-            logging.warning("Response is still over the character limit even after summarization. Truncating response.")
-            final_reply = final_reply[:MAX_DISCORD_LENGTH]
+    def clear_all_history(self):
+        """Clear the entire chat history for testing purposes."""
+        self.session.query(ChatHistory).delete()
+        self.session.commit()
 
-        # Update memory with the response
-        try:
-            memory.save_context({"input": final_reply}, {"output": final_reply})
-            logging.debug("Reply successfully saved to memory.")
-        except ValueError as e:
-            logging.error(f"Error saving reply context: {e}")
+    def close(self):
+        """Close the SQLAlchemy session when done."""
+        self.session.close()
 
-        # Update last activity timestamp
-        user_memory[user_id]["last_activity"] = datetime.now()
 
-        return final_reply
 
-    def get_response_from_llm(self, context):
-        """Send context to the Flask API to get a response from the LLM."""
-        payload = {"text": context}
-        try:
-            response = requests.post(self.flask_url, json=payload)
-            response.raise_for_status()
+# Instance of the ChatInterface Singleton
+chat_interface = ChatInterface(server_url="http://localhost:5000", db_url="sqlite:///chat_history.db")
 
-            # Ensure the response is in JSON format
-            response_data = response.json()
-            if isinstance(response_data, dict):
-                return response_data.get("response", "Could not process your request.")
-            else:
-                logging.error("Error: Response data is not a dictionary.")
-                return "Invalid response format from LLM."
-        except requests.RequestException as e:
-            logging.error(f"Error communicating with backend: {e}")
-            return "There was an error processing your request."
-
-    def ensure_character_limit(self, reply):
-        """Ensure the reply fits within Discord's character limit, and summarize if needed."""
-        if len(reply) > MAX_DISCORD_LENGTH:
-            logging.info("Response exceeds max character limit, attempting to summarize.")
-            summary_payload = {"text": SUMMARY_PROMPT + "\n" + reply}
-            try:
-                summary_response = requests.post(self.flask_url, json=summary_payload)
-                summary_response.raise_for_status()
-                summary_data = summary_response.json()
-                if isinstance(summary_data, dict):
-                    summary_reply = summary_data.get("response", "Could not summarize the request.")
-                    logging.debug(f"Summary response: {summary_reply}")
-                    return summary_reply if len(summary_reply) <= MAX_DISCORD_LENGTH else summary_reply[:MAX_DISCORD_LENGTH]
-                else:
-                    logging.error("Error: Summary response is not a dictionary.")
-                    return reply[:MAX_DISCORD_LENGTH]
-            except requests.RequestException as e:
-                logging.error(f"Error summarizing response: {e}")
-            return reply[:MAX_DISCORD_LENGTH]
-        return reply
-
-# Initialize the chat interface instance
-chat_interface = ChatInterface()
