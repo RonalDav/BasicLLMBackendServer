@@ -3,10 +3,17 @@ Chat Interface for User Interaction with Language Model Backend
 
 This script defines a chat interface that interacts with a language model backend (Flask API)
 to process user messages, manage user memory, and ensure responses fit within character limits.
+Part of this is a migration from what I have used to make an LLM powered discord bot.
 
 Status:
 Incomplete memory management and output parsing. Memory DB still neds work.
 
+<<<<<<< HEAD
+=======
+Constants:
+- MAX_DISCORD_LENGTH: The maximum allowed character length for messages (2000 characters).
+- SUMMARY_PROMPT: The prompt used for summarizing responses that exceed the character limit.
+>>>>>>> origin/HEAD
 
 """
 import requests
@@ -103,3 +110,40 @@ class ChatInterface:
 # Instance of the ChatInterface Singleton
 chat_interface = ChatInterface(server_url="http://localhost:5000", db_url="sqlite:///chat_history.db")
 
+<<<<<<< HEAD
+=======
+            # Ensure the response is in JSON format
+            response_data = response.json()
+            if isinstance(response_data, dict):
+                return response_data.get("response", "Could not process your request.")
+            else:
+                logging.error("Error: Response data is not a dictionary.")
+                return "Invalid response format from LLM."
+        except requests.RequestException as e:
+            logging.error(f"Error communicating with backend: {e}")
+            return "There was an error processing your request."
+
+    def ensure_character_limit(self, reply):
+        """Ensure the reply fits within the character limit, and summarize if needed."""
+        if len(reply) > MAX_DISCORD_LENGTH:
+            logging.info("Response exceeds max character limit, attempting to summarize.")
+            summary_payload = {"text": SUMMARY_PROMPT + "\n" + reply}
+            try:
+                summary_response = requests.post(self.flask_url, json=summary_payload)
+                summary_response.raise_for_status()
+                summary_data = summary_response.json()
+                if isinstance(summary_data, dict):
+                    summary_reply = summary_data.get("response", "Could not summarize the request.")
+                    logging.debug(f"Summary response: {summary_reply}")
+                    return summary_reply if len(summary_reply) <= MAX_DISCORD_LENGTH else summary_reply[:MAX_DISCORD_LENGTH]
+                else:
+                    logging.error("Error: Summary response is not a dictionary.")
+                    return reply[:MAX_DISCORD_LENGTH]
+            except requests.RequestException as e:
+                logging.error(f"Error summarizing response: {e}")
+            return reply[:MAX_DISCORD_LENGTH]
+        return reply
+
+# Initialize the chat interface instance
+chat_interface = ChatInterface()
+>>>>>>> origin/HEAD
